@@ -222,6 +222,50 @@ func (c *aadClient) SamlAssertionWithContext(ctx context.Context) (*credentials.
 	return c.saml, nil
 }
 
+func (c *aadClient) samlRequest(ctx context.Context, u *url.URL) error {
+	if c.saml != nil && len(*c.saml) > 0 {
+		t, err := c.saml.ExpiresAt()
+		if err != nil {
+			return err
+		}
+
+		if t.After(time.Now()) {
+			return nil
+		}
+	}
+
+	// must use http client which will not auto-follow redirects ... apparently except for okta (maybe onelogin?)
+	// just be sure to update any non-redirect cases in the individual client implementations by
+	// setting c.httpClient.CheckRedirect as below
+	// httpClient := http.Client{
+	//	Jar: c.httpClient.Jar,
+	//	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	//		return http.ErrUseLastResponse
+	//	},
+	// }
+
+	req, err := newHttpRequest(ctx, http.MethodGet, u.String())
+	if err != nil {
+		return err
+	}
+
+	var res *http.Response
+	res, err = checkResponseError(c.httpClient.Do(req.Request))
+	if err != nil {
+		return fmt.Errorf("SAML request error %w", err)
+	}
+	defer res.Body.Close()
+
+	if strings.Contains(res.Request.URL.String(), "evice") {
+		res, err = c.submitResponse(res.Request.URL, res.Body)
+		if err != nil {
+			return err
+		}
+	}
+
+	return c.handleSamlResponse(res.Body)
+}
+
 func (c *aadClient) parseTenantId() error {
 	c.tenantId = c.authUrl.Query().Get("tenantId")
 	if len(c.tenantId) < 1 {
@@ -322,6 +366,14 @@ func (c *aadClient) auth(ctx context.Context, authUrl *url.URL, authRes *aadAuth
 		if err != nil {
 			return err
 		}
+
+		if strings.Contains(res.Request.URL.String(), "evice") {
+			res, err = c.submitResponse(authUrl, res.Body)
+			if err != nil {
+				return err
+			}
+		}
+
 	}
 
 	// test for auth failure. Ideally auth failure for a federated user set 'err' and returned before this,
